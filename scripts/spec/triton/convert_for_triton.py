@@ -1,0 +1,534 @@
+import os
+from pathlib import Path
+import shutil
+import sys
+
+import numpy as np
+import torch
+import torch.nn as nn
+import jax
+import pickle
+import orbax.checkpoint as ocp
+from transformers import AutoTokenizer
+
+
+def _prefer_local_repo_src(script_path: str | Path) -> Path | None:
+    src_dir = Path(script_path).resolve().parents[2] / "src"
+    if not src_dir.is_dir():
+        return None
+    src_dir = src_dir.resolve()
+    sys.path[:] = [p for p in sys.path if Path(p).resolve() != src_dir]
+    sys.path.insert(0, str(src_dir))
+    return src_dir
+
+
+_prefer_local_repo_src(__file__)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from openpi.models import gemma as _gemma
+
+
+def _merge_einsum_lora_inplace(node: dict, *, scale: float) -> None:
+    if "lora_a" not in node or "lora_b" not in node:
+        return
+    base = np.asarray(node["w"]["value"], dtype=np.float32)
+    lora_a = np.asarray(node["lora_a"]["value"], dtype=np.float32)
+    lora_b = np.asarray(node["lora_b"]["value"], dtype=np.float32)
+    node["w"]["value"] = base + np.matmul(lora_a, lora_b) * float(scale)
+
+
+def _merge_ffn_lora_inplace(node: dict, *, base_key: str, lora_a_key: str, lora_b_key: str) -> None:
+    if lora_a_key not in node or lora_b_key not in node:
+        return
+    base = np.asarray(node[base_key]["value"], dtype=np.float32)
+    lora_a = np.asarray(node[lora_a_key]["value"], dtype=np.float32)
+    lora_b = np.asarray(node[lora_b_key]["value"], dtype=np.float32)
+    # openpi.models.lora.FeedForward._dot does not apply scaling_value. The current
+    # Gemma LoRA configs use alpha == rank, so the effective scale is still 1.0.
+    node[base_key]["value"] = base + np.matmul(lora_a, lora_b)
+
+
+def merge_lora_weights(dump_weights: dict) -> None:
+    llm_layers = dump_weights["PaliGemma"]["llm"]["layers"]
+    encoder_attn_scale = _gemma.get_config("gemma_2b_lora").lora_configs["attn"].scaling_value
+    decoder_attn_scale = _gemma.get_config("gemma_300m_lora").lora_configs["attn"].scaling_value
+
+    attn_node = llm_layers["attn"]
+    _merge_einsum_lora_inplace(attn_node["q_einsum"], scale=encoder_attn_scale)
+    _merge_einsum_lora_inplace(attn_node["kv_einsum"], scale=encoder_attn_scale)
+    _merge_einsum_lora_inplace(attn_node["attn_vec_einsum"], scale=encoder_attn_scale)
+    _merge_einsum_lora_inplace(attn_node["q_einsum_1"], scale=decoder_attn_scale)
+    _merge_einsum_lora_inplace(attn_node["kv_einsum_1"], scale=decoder_attn_scale)
+    _merge_einsum_lora_inplace(attn_node["attn_vec_einsum_1"], scale=decoder_attn_scale)
+
+    _merge_ffn_lora_inplace(
+        llm_layers["mlp"],
+        base_key="gating_einsum",
+        lora_a_key="gating_einsum_lora_a",
+        lora_b_key="gating_einsum_lora_b",
+    )
+    _merge_ffn_lora_inplace(
+        llm_layers["mlp"],
+        base_key="linear",
+        lora_a_key="linear_lora_a",
+        lora_b_key="linear_lora_b",
+    )
+    _merge_ffn_lora_inplace(
+        llm_layers["mlp_1"],
+        base_key="gating_einsum",
+        lora_a_key="gating_einsum_lora_a",
+        lora_b_key="gating_einsum_lora_b",
+    )
+    _merge_ffn_lora_inplace(
+        llm_layers["mlp_1"],
+        base_key="linear",
+        lora_a_key="linear_lora_a",
+        lora_b_key="linear_lora_b",
+    )
+
+def convert_weights(weights, dump_weights):
+    merge_lora_weights(dump_weights)
+
+    # vision encoder weights
+    weights['vision_patch_embedding_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['embedding']['kernel']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_patch_embedding_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['embedding']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_position_embedding'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['pos_embedding']['value'], dtype=torch.bfloat16, device="cpu").squeeze())
+
+    vision_attn_qkv_w = torch.cat([
+        torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['query']['kernel']['value'], dtype=torch.bfloat16, device="cpu").flatten(2),
+        torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['key']['kernel']['value'], dtype=torch.bfloat16, device="cpu").flatten(2),
+        torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['value']['kernel']['value'], dtype=torch.bfloat16, device="cpu").flatten(2),
+    ], dim=2)
+    weights['vision_attn_qkv_w'].copy_(vision_attn_qkv_w)
+    vision_attn_qkv_b = torch.cat([
+        torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['query']['bias']['value'], dtype=torch.bfloat16, device="cpu").flatten(1),
+        torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['key']['bias']['value'], dtype=torch.bfloat16, device="cpu").flatten(1),
+        torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['value']['bias']['value'], dtype=torch.bfloat16, device="cpu").flatten(1),
+    ], dim=1)
+    weights['vision_attn_qkv_b'].copy_(vision_attn_qkv_b)
+    weights['vision_attn_o_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['out']['kernel']['value'], dtype=torch.bfloat16, device="cpu").flatten(1, -2))
+    weights['vision_attn_o_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MultiHeadDotProductAttention_0']['out']['bias']['value'], dtype=torch.bfloat16, device="cpu").flatten(1))
+
+    weights['vision_ffn_up_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MlpBlock_0']['Dense_0']['kernel']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_ffn_up_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MlpBlock_0']['Dense_0']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_ffn_down_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MlpBlock_0']['Dense_1']['kernel']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_ffn_down_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['MlpBlock_0']['Dense_1']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+
+    weights['vision_pre_attn_norm_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['LayerNorm_0']['scale']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_pre_attn_norm_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['LayerNorm_0']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_pre_ffn_norm_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['LayerNorm_1']['scale']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_pre_ffn_norm_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoderblock']['LayerNorm_1']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_final_norm_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoder_norm']['scale']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['vision_final_norm_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['Transformer']['encoder_norm']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+
+    # encoder weights
+    weights['encoder_multi_modal_projector_w'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['head']['kernel']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['encoder_multi_modal_projector_b'].copy_(torch.tensor(dump_weights['PaliGemma']['img']['head']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+    w_scale = dump_weights['PaliGemma']['llm']['layers']['pre_attention_norm']['scale']['value'].astype('float32')
+
+    w_q = dump_weights['PaliGemma']['llm']['layers']['attn']['q_einsum']['w']['value'].astype('float32')
+    w_q = w_q.transpose((0, 2, 1, 3)).reshape((18, 2048, 8 * 256))
+    w_k = dump_weights['PaliGemma']['llm']['layers']['attn']['kv_einsum']['w']['value'][:, 0, 0].astype('float32')
+    w_v = dump_weights['PaliGemma']['llm']['layers']['attn']['kv_einsum']['w']['value'][:, 1, 0].astype('float32')
+    w_q *= (1 + w_scale[:, :, None])
+    w_k *= (1 + w_scale[:, :, None])
+    w_v *= (1 + w_scale[:, :, None])
+    w_q = w_q.reshape((18, 2048, 8, 2, 128)).transpose((0, 1, 2, 4, 3)).reshape((18, 2048, 2048))
+    w_k = w_k.reshape((18, 2048, 2, 128)).transpose((0, 1, 3, 2)).reshape((18, 2048, 256))
+
+    weights['encoder_attn_qkv_w'] = torch.tensor(
+        np.concatenate([w_q, w_k, w_v], axis = 2),
+        dtype=torch.bfloat16, device="cpu"
+    )
+    w_attn_o = dump_weights['PaliGemma']['llm']['layers']['attn']['attn_vec_einsum']['w']['value'].reshape((18, 8 * 256, 2048)).astype('float32')
+    weights['encoder_attn_o_w'] = torch.tensor(
+        w_attn_o,
+        dtype=torch.bfloat16, device="cpu"
+    )
+    
+    rms_norm = dump_weights['PaliGemma']['llm']['layers']['pre_ffw_norm']['scale']['value'].astype('float32')
+    w_gate = dump_weights['PaliGemma']['llm']['layers']['mlp']['gating_einsum']['value'][:, 0].astype('float32')
+    w_up = dump_weights['PaliGemma']['llm']['layers']['mlp']['gating_einsum']['value'][:, 1].astype('float32')
+    w_down = dump_weights['PaliGemma']['llm']['layers']['mlp']['linear']['value'].astype('float32')
+    w_gate *= (1 + rms_norm[:, :, None])
+    w_up *= (1 + rms_norm[:, :, None])
+
+    weights['encoder_ffn_gate_w'] = torch.tensor(
+        w_gate,
+        dtype=torch.bfloat16, device="cpu"
+    )
+    weights['encoder_ffn_up_w'] = torch.tensor(
+        w_up,
+        dtype=torch.bfloat16, device="cpu"
+    )
+    weights['encoder_ffn_down_w'] = torch.tensor(
+        w_down,
+        dtype=torch.bfloat16, device="cpu"
+    )
+
+    # decoder weights
+    w_scale = dump_weights['PaliGemma']['llm']['layers']['pre_attention_norm_1']['scale']['value'].astype('float32')
+
+    w_q = dump_weights['PaliGemma']['llm']['layers']['attn']['q_einsum_1']['w']['value'].astype('float32')
+    w_q = w_q.transpose((0, 2, 1, 3)).reshape((18, 1024, 8 * 256))
+    w_k = dump_weights['PaliGemma']['llm']['layers']['attn']['kv_einsum_1']['w']['value'][:, 0, 0].astype('float32')
+    w_v = dump_weights['PaliGemma']['llm']['layers']['attn']['kv_einsum_1']['w']['value'][:, 1, 0].astype('float32')
+    w_q *= (1 + w_scale[:, :, None])
+    w_k *= (1 + w_scale[:, :, None])
+    w_v *= (1 + w_scale[:, :, None])
+    w_q = w_q.reshape((18, 1024, 8, 2, 128)).transpose((0, 1, 2, 4, 3)).reshape((18, 1024, 2048))
+    w_k = w_k.reshape((18, 1024, 2, 128)).transpose((0, 1, 3, 2)).reshape((18, 1024, 256))
+    weights['decoder_attn_qkv_w'] = torch.tensor(
+        np.concatenate([w_q, w_k, w_v], axis = 2),
+        dtype=torch.bfloat16, device="cpu"
+    )
+
+    w_attn_o = dump_weights['PaliGemma']['llm']['layers']['attn']['attn_vec_einsum_1']['w']['value'].reshape((18, 8 * 256, 1024)).astype('float32')
+    weights['decoder_attn_o_w'] = torch.tensor(
+        w_attn_o,
+        dtype=torch.bfloat16, device="cpu"
+    )
+
+    rms_norm = dump_weights['PaliGemma']['llm']['layers']['pre_ffw_norm_1']['scale']['value'].astype('float32')
+    w_gate = dump_weights['PaliGemma']['llm']['layers']['mlp_1']['gating_einsum']['value'][:, 0].astype('float32')
+    w_up = dump_weights['PaliGemma']['llm']['layers']['mlp_1']['gating_einsum']['value'][:, 1].astype('float32')
+    w_down = dump_weights['PaliGemma']['llm']['layers']['mlp_1']['linear']['value'].astype('float32')
+    w_gate *= (1 + rms_norm[:, :, None])
+    w_up *= (1 + rms_norm[:, :, None])
+    weights['decoder_ffn_gate_w'] = torch.tensor(
+        w_gate,
+        dtype=torch.bfloat16, device="cpu"
+    )
+    weights['decoder_ffn_up_w'] = torch.tensor(
+        w_up,
+        dtype=torch.bfloat16, device="cpu"
+    )
+    weights['decoder_ffn_down_w'] = torch.tensor(
+        w_down,
+        dtype=torch.bfloat16, device="cpu"
+    )
+
+    weights['decoder_state_in_proj_w'].copy_(torch.tensor(dump_weights['state_proj']['kernel']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['decoder_state_in_proj_b'].copy_(torch.tensor(dump_weights['state_proj']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+
+    def _create_sinusoidal_pos_embedding(time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"):
+        dtype = torch.float32
+        fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
+        period = min_period * (max_period / min_period) ** fraction
+        scaling_factor = 1.0 / period * 2 * torch.pi
+        sin_input = scaling_factor[None, :] * time[:, None]
+        pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+        return pos_emb
+
+    n_decode_steps = 10
+    mlp_in_weight_action = torch.tensor(
+        dump_weights['action_time_mlp_in']['kernel']['value'][:1024, :],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    mlp_in_weight_time = torch.tensor(
+        dump_weights['action_time_mlp_in']['kernel']['value'][1024:, :],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    action_time_mlp_in_b = torch.tensor(
+        dump_weights['action_time_mlp_in']['bias']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    action_in_proj_w = torch.tensor(
+        dump_weights['action_in_proj']['kernel']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    action_in_proj_b = torch.tensor(
+        dump_weights['action_in_proj']['bias']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    action_time_mlp_in_w = torch.tensor(
+        dump_weights['action_time_mlp_in']['kernel']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    decoder_action_fused_out_proj_w = torch.tensor(
+        dump_weights['action_out_proj']['kernel']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    decoder_action_fused_out_proj_b = torch.tensor(
+        dump_weights['action_out_proj']['bias']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+    final_norm_scale = torch.tensor(
+        dump_weights['PaliGemma']['llm']['final_norm_1']['scale']['value'],
+        dtype=torch.bfloat16, device="cpu"
+    )
+
+    fused_weight = torch.matmul(action_in_proj_w, mlp_in_weight_action)
+    action_bias_contrib = torch.matmul(mlp_in_weight_action.T, action_in_proj_b)
+    time_dependent_biases = torch.zeros(n_decode_steps, 1024, device="cpu", dtype=torch.bfloat16)
+    for t in range(n_decode_steps):
+        time_val = 1.0 - t / n_decode_steps
+        time_tensor = torch.tensor([time_val], device="cpu")
+        time_emb = _create_sinusoidal_pos_embedding(time_tensor, 1024, 4e-3, 4.0, "cpu").squeeze(0)
+        time_emb = time_emb.to(torch.bfloat16)
+        time_contrib = torch.matmul(mlp_in_weight_time.T, time_emb)
+        time_dependent_biases[t] = (
+            action_bias_contrib + time_contrib + action_time_mlp_in_b
+        ).to(torch.bfloat16)
+    
+    weights['decoder_action_mlp_w'].copy_(torch.tensor(dump_weights['action_time_mlp_out']['kernel']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['decoder_action_mlp_b'].copy_(torch.tensor(dump_weights['action_time_mlp_out']['bias']['value'], dtype=torch.bfloat16, device="cpu"))
+    weights['decoder_action_in_proj_w'].copy_(action_in_proj_w)
+    weights['decoder_action_in_proj_b'].copy_(action_in_proj_b)
+    weights['decoder_action_time_mlp_in_w'].copy_(action_time_mlp_in_w)
+    weights['decoder_action_time_mlp_in_b'].copy_(action_time_mlp_in_b)
+
+    decoder_action_fused_out_proj_w *= (1 + final_norm_scale[:, None])
+    decoder_action_fused_out_proj_w *= -0.1
+    decoder_action_fused_out_proj_b *= -0.1
+    weights['decoder_action_fused_in_proj_w'].copy_(fused_weight)
+    weights['decoder_action_fused_time_biases'].copy_(time_dependent_biases)
+    weights['decoder_action_fused_out_proj_w'].copy_(decoder_action_fused_out_proj_w)
+    weights['decoder_action_fused_out_proj_b'].copy_(decoder_action_fused_out_proj_b)
+
+def load_jax_weights(jax_path: str):
+    params_path = os.path.join(jax_path, "params")
+    print(f"Loading jax weights from {params_path}")
+
+    single_device_sharding = jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0])
+    
+    with ocp.PyTreeCheckpointer() as ckptr:
+        metadata = ckptr.metadata(params_path)
+        params = ckptr.restore(
+            params_path,
+            ocp.args.PyTreeRestore(
+                item=metadata,
+                restore_args=jax.tree.map(
+                    lambda _: ocp.ArrayRestoreArgs(
+                        restore_type=jax.Array,
+                        sharding=single_device_sharding,
+                    ),
+                    metadata,
+                ),
+                transforms={},
+            ),
+        )["params"]
+        print(f"Loaded JAX params keys: {params.keys()}")
+
+    def _ensure_value_dict(node):
+        if isinstance(node, dict):
+            new_node = {}
+            for key, value in node.items():
+                if key == "value":
+                    if isinstance(value, dict):
+                        new_node[key] = _ensure_value_dict(value)
+                    else:
+                        new_node[key] = value
+                else:
+                    new_node[key] = _ensure_value_dict(value)
+            return new_node
+        else:
+            return {"value": node}
+
+    return _ensure_value_dict(params)
+
+def prepare_prompt(prompt: str, embedding_weight, tokenizer_path):
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    embedding_weight_torch = torch.tensor(
+        embedding_weight,
+        dtype=torch.bfloat16, device="cuda"
+    )
+    num_embeddings, embedding_dim = embedding_weight_torch.shape
+    language_embedding = nn.Embedding(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+        ).bfloat16().cuda()
+    with torch.no_grad():
+        language_embedding.weight.copy_(embedding_weight_torch)
+    prompt = [prompt.strip().replace("_", " ") + "\n"]
+    language_tokens = tokenizer(
+        prompt,
+        max_length=48,
+        return_tensors="pt",
+    )["input_ids"].to(device="cuda").squeeze(0)
+    language_embeds = language_embedding(language_tokens)
+    language_embeds *= language_embeds.shape[-1] ** 0.5
+    language_embeds = language_embeds.to(device="cpu")
+    return language_embeds, language_embeds.shape[0]
+
+
+def _run_lora_merge_self_test() -> None:
+    attn_scale = _gemma.get_config("gemma_2b_lora").lora_configs["attn"].scaling_value
+    attn_node = {
+        "w": {"value": np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)},
+        "lora_a": {"value": np.arange(2 * 3 * 2, dtype=np.float32).reshape(2, 3, 2)},
+        "lora_b": {"value": np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4)},
+    }
+    attn_expected = attn_node["w"]["value"] + np.matmul(attn_node["lora_a"]["value"], attn_node["lora_b"]["value"]) * attn_scale
+    _merge_einsum_lora_inplace(attn_node, scale=attn_scale)
+    np.testing.assert_allclose(attn_node["w"]["value"], attn_expected, rtol=1e-6, atol=1e-6)
+
+    ffn_node = {
+        "gating_einsum": {"value": np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)},
+        "gating_einsum_lora_a": {"value": np.arange(2 * 3 * 2, dtype=np.float32).reshape(2, 3, 2)},
+        "gating_einsum_lora_b": {"value": np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4)},
+    }
+    ffn_expected = ffn_node["gating_einsum"]["value"] + np.matmul(
+        ffn_node["gating_einsum_lora_a"]["value"],
+        ffn_node["gating_einsum_lora_b"]["value"],
+    )
+    _merge_ffn_lora_inplace(
+        ffn_node,
+        base_key="gating_einsum",
+        lora_a_key="gating_einsum_lora_a",
+        lora_b_key="gating_einsum_lora_b",
+    )
+    np.testing.assert_allclose(ffn_node["gating_einsum"]["value"], ffn_expected, rtol=1e-6, atol=1e-6)
+
+
+def _base_artifact_paths(output: str | Path) -> tuple[Path, Path]:
+    output_path = Path(output)
+    if output_path.suffix == ".pkl":
+        return output_path.parent, output_path
+    return output_path, output_path / "base_weights.pkl"
+
+
+def _draft_artifact_paths(output: str | Path) -> tuple[Path, Path]:
+    output_path = Path(output)
+    if output_path.suffix == ".pkl":
+        return output_path.parent, output_path
+    return output_path, output_path / "draft_triton.pkl"
+
+
+def _copy_assets_for_base_artifact(*, jax_path: str | Path, artifact_dir: Path) -> None:
+    source_assets = Path(jax_path) / "assets"
+    if not source_assets.is_dir():
+        raise FileNotFoundError(f"Missing norm stats assets directory: {source_assets}")
+    shutil.copytree(source_assets, artifact_dir / "assets", dirs_exist_ok=True)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Convert base and draft checkpoints to Triton Spec artifacts."
+    )
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--mode", type=str, choices=["base", "draft"], default="base")
+    parser.add_argument("--jax_path", "--jax-path", type=str, default=None, dest="jax_path")
+    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--prompt", type=str, default=None)
+    parser.add_argument("--tokenizer_path", "--tokenizer-path", type=str, default=None, dest="tokenizer_path")
+    parser.add_argument(
+        "--draft-ckpt",
+        "--draft_ckpt",
+        type=str,
+        default=None,
+        dest="draft_ckpt",
+        help="PyTorch draft checkpoint from scripts/spec/spec_draft_train.py (mode=draft).",
+    )
+    args = parser.parse_args()
+
+    if args.self_test:
+        _run_lora_merge_self_test()
+        print("LoRA merge self-test passed")
+        raise SystemExit(0)
+
+    if str(args.mode) == "draft":
+        if not args.draft_ckpt or not args.output:
+            parser.error("--mode draft requires --draft-ckpt and --output")
+        from triton_pi0_runtime import convert_spec_draft_checkpoint
+
+        _, draft_output_path = _draft_artifact_paths(args.output)
+        out_path = convert_spec_draft_checkpoint(
+            draft_checkpoint_path=args.draft_ckpt,
+            output_path=draft_output_path,
+        )
+        print(f"Saved draft Triton checkpoint to {out_path}")
+        raise SystemExit(0)
+
+    missing = [name for name in ("jax_path", "output") if getattr(args, name) is None]
+    if args.prompt is not None and args.tokenizer_path is None:
+        missing.append("tokenizer_path")
+    if missing:
+        parser.error(f"missing required arguments: {', '.join('--' + name.replace('_', '-') for name in missing)}")
+
+    num_views = 2
+    dump_weights = load_jax_weights(args.jax_path)
+    embedding_weight = dump_weights['PaliGemma']['llm']['embedder']['input_embedding']['value']
+
+    if args.prompt is None:
+        import triton_pi0_runtime as _triton_runtime
+
+        weights = _triton_runtime._empty_pi0_triton_weights(1)
+        convert_weights(weights, dump_weights)
+        weights.pop("language_embeds", None)
+        weights["language_embedding_weight"] = torch.as_tensor(
+            embedding_weight,
+            dtype=torch.bfloat16,
+            device="cpu",
+        ).contiguous()
+        artifact_dir, output_path = _base_artifact_paths(args.output)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _copy_assets_for_base_artifact(jax_path=args.jax_path, artifact_dir=artifact_dir)
+        with output_path.open("wb") as f:
+            pickle.dump(weights, f)
+        print(f"Saved shared Triton base checkpoint to {output_path}")
+        print(f"Copied norm stats assets to {artifact_dir / 'assets'}")
+        raise SystemExit(0)
+
+    language_embeds, prompt_len = prepare_prompt(args.prompt, embedding_weight, args.tokenizer_path)
+
+    weights = {
+        "vision_patch_embedding_w":           torch.zeros(14, 14, 3, 1152,        dtype = torch.bfloat16, device = "cpu"),
+        "vision_patch_embedding_b":           torch.zeros(1152,                   dtype = torch.bfloat16, device = "cpu"),
+        "vision_position_embedding":          torch.zeros(256, 1152,              dtype = torch.bfloat16, device = "cpu"),
+        "vision_attn_qkv_w":                  torch.zeros(27, 1152, 3 * 1152,     dtype = torch.bfloat16, device = "cpu"),
+        "vision_attn_qkv_b":                  torch.zeros(27, 3 * 1152,           dtype = torch.bfloat16, device = "cpu"),
+        "vision_attn_o_w":                    torch.zeros(27, 1152, 1152,         dtype = torch.bfloat16, device = "cpu"),
+        "vision_attn_o_b":                    torch.zeros(27, 1152,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_ffn_up_w":                    torch.zeros(27, 1152, 4304,         dtype = torch.bfloat16, device = "cpu"),
+        "vision_ffn_up_b":                    torch.zeros(27, 4304,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_ffn_down_w":                  torch.zeros(27, 4304, 1152,         dtype = torch.bfloat16, device = "cpu"),
+        "vision_ffn_down_b":                  torch.zeros(27, 1152,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_pre_attn_norm_w":             torch.zeros(27, 1152,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_pre_attn_norm_b":             torch.zeros(27, 1152,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_pre_ffn_norm_w":              torch.zeros(27, 1152,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_pre_ffn_norm_b":              torch.zeros(27, 1152,               dtype = torch.bfloat16, device = "cpu"),
+        "vision_final_norm_w":                torch.zeros(1152,                   dtype = torch.bfloat16, device = "cpu"),
+        "vision_final_norm_b":                torch.zeros(1152,                   dtype = torch.bfloat16, device = "cpu"),
+
+        "encoder_multi_modal_projector_w":    torch.zeros(1152, 2048,             dtype = torch.bfloat16, device = "cpu"),
+        "encoder_multi_modal_projector_b":    torch.zeros(2048,                   dtype = torch.bfloat16, device = "cpu"),
+        "encoder_attn_qkv_w":                 torch.zeros(18, 2048, 2560,         dtype = torch.bfloat16, device = "cpu"),
+        "encoder_attn_o_w":                   torch.zeros(18, 2048, 2048,         dtype = torch.bfloat16, device = "cpu"),
+        "encoder_ffn_gate_w":                 torch.zeros(18, 2048, 16384,        dtype = torch.bfloat16, device = "cpu"),
+        "encoder_ffn_up_w":                   torch.zeros(18, 2048, 16384,        dtype = torch.bfloat16, device = "cpu"),
+        "encoder_ffn_down_w":                 torch.zeros(18, 16384, 2048,        dtype = torch.bfloat16, device = "cpu"),
+
+        "decoder_state_in_proj_w":            torch.zeros(32, 1024,               dtype = torch.bfloat16, device = "cpu"),
+        "decoder_state_in_proj_b":            torch.zeros(1024,                   dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_in_proj_w":           torch.zeros(32, 1024,               dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_in_proj_b":           torch.zeros(1024,                   dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_time_mlp_in_w":        torch.zeros(2048, 1024,             dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_time_mlp_in_b":        torch.zeros(1024,                   dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_fused_in_proj_w":     torch.zeros(32, 1024,               dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_fused_time_biases":   torch.zeros(10, 1024,               dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_mlp_w":               torch.zeros(1024, 1024,             dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_mlp_b":               torch.zeros(1024,                   dtype = torch.bfloat16, device = "cpu"),
+        "decoder_attn_qkv_w":                 torch.zeros(18, 1024, 2560,         dtype = torch.bfloat16, device = "cpu"),
+        "decoder_attn_o_w":                   torch.zeros(18, 2048, 1024,         dtype = torch.bfloat16, device = "cpu"),
+        "decoder_ffn_gate_w":                 torch.zeros(18, 1024, 4096,         dtype = torch.bfloat16, device = "cpu"),
+        "decoder_ffn_up_w":                   torch.zeros(18, 1024, 4096,         dtype = torch.bfloat16, device = "cpu"),
+        "decoder_ffn_down_w":                 torch.zeros(18, 4096, 1024,         dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_fused_out_proj_w":    torch.zeros(1024, 32,               dtype = torch.bfloat16, device = "cpu"),
+        "decoder_action_fused_out_proj_b":    torch.zeros(32,                     dtype = torch.bfloat16, device = "cpu"),
+        "language_embeds":                    torch.zeros(prompt_len, 2048, dtype = torch.bfloat16, device = "cpu"),
+    }
+    
+    convert_weights(weights, dump_weights)
+    weights['language_embeds'].copy_(language_embeds)
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open('wb') as f:
+        pickle.dump(weights, f)
+    print(f"Saved to {output_path}")

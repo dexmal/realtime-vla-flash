@@ -1,0 +1,90 @@
+{
+  "name": "main_exp",
+  "output_root": "/Ferrata/njh/sweeps",
+  "server_base_args": {
+    "port": 8000,
+    "checkpoint_dir": "/mlp_vepfs/share/njh/pi0_libero_pytorch/",
+    "jax_checkpoint_dir": "/mlp_vepfs/share/pi_models/openpi-assets/checkpoints/pi0_libero"
+  },
+  "suite_server_args": {
+    "libero_spatial": {
+      "cache_dir": "data/triton/pi0_libero_spatial_cache",
+      "draft_checkpoint": "/mlp_vepfs/share/njh/spec_ckpts/draft_vlm_block_4x4090_spatial.pt",
+      "draft_triton_path": "data/triton/pi0_libero_spatial_cache/draft_triton.pkl"
+    },
+    "libero_object": {
+      "cache_dir": "data/triton/pi0_libero_object_cache",
+      "draft_checkpoint": "/mlp_vepfs/share/njh/spec_ckpts/draft_vlm_block_4x4090_object.pt",
+      "draft_triton_path": "data/triton/pi0_libero_object_cache/draft_triton.pkl"
+    },
+    "libero_goal": {
+      "cache_dir": "data/triton/pi0_libero_goal_cache",
+      "draft_checkpoint": "/mlp_vepfs/share/njh/spec_ckpts/draft_vlm_block_4x4090_goal.pt",
+      "draft_triton_path": "data/triton/pi0_libero_goal_cache/draft_triton.pkl"
+    },
+    "libero_10": {
+      "cache_dir": "data/triton/pi0_libero_10_cache",
+      "draft_checkpoint": "/mlp_vepfs/share/njh/spec_ckpts/draft_vlm_block_4x4090_10.pt",
+      "draft_triton_path": "data/triton/pi0_libero_10_cache/draft_triton.pkl"
+    }
+  },
+  "client_base_args": {
+    "num_trials_per_task": 50,
+    "task": null,
+    "seed": 7
+  },
+  "runs": [
+    {
+      "name": "spatial",
+      "suites": ["libero_spatial"],
+      "server_args": {
+        "tau_radius": 0.15,
+        "t_list": [0.1, 0.05],
+        "periodic_full_every_n_draft_rounds": 0,
+        "enable_gripper_verify": true,
+        "enable_gripper_post_verify": true,
+        "backend": "triton"
+      },
+      "client_args": { "task": null }
+    },
+    {
+      "name": "object",
+      "suites": ["libero_object"],
+      "server_args": {
+        "tau_radius": 0.15,
+        "t_list": [0.1, 0.05],
+        "periodic_full_every_n_draft_rounds": 0,
+        "enable_gripper_verify": false,
+        "enable_gripper_post_verify": false,
+        "backend": "triton"
+      },
+      "client_args": { "task": null }
+    },
+    {
+      "name": "goal",
+      "suites": ["libero_goal"],
+      "server_args": {
+        "tau_radius": 0.15,
+        "t_list": [0.1, 0.05],
+        "periodic_full_every_n_draft_rounds": 4,
+        "enable_gripper_verify": true,
+        "enable_gripper_post_verify": true,
+        "backend": "triton"
+      },
+      "client_args": { "task": null }
+    },
+    {
+      "name": "10",
+      "suites": ["libero_10"],
+      "server_args": {
+        "tau_radius": 0.15,
+        "t_list": [0.1, 0.05],
+        "periodic_full_every_n_draft_rounds": 2,
+        "enable_gripper_verify": true,
+        "enable_gripper_post_verify": true,
+        "backend": "triton"
+      },
+      "client_args": { "task": null }
+    }
+  ]
+}

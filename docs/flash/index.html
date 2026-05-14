@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Realtime-VLA FLASH: Speculative Inference Framework for Diffusion-based VLAs"
+    />
+    <title>Realtime-VLA FLASH</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Realtime-VLA FLASH home">
+        <span class="brand-emoji" aria-hidden="true">⚡️</span>
+        <span>Realtime-VLA FLASH</span>
+      </a>
+      <nav class="nav-links" aria-label="Project navigation">
+        <a href="#demos">Demos</a>
+        <a href="#overview">Overview</a>
+        <a href="#method">Method</a>
+        <a href="#results">Results</a>
+        <a href="#citation">Citation</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <h1 class="hero-title">
+            <span class="title-brand">
+              <span>⚡️ Realtime-VLA</span>
+              <span class="title-accent">FLASH</span>
+            </span>
+            <span class="title-subject">
+              <span>Speculative Inference Framework</span>
+              <span>for Diffusion-based VLAs</span>
+            </span>
+          </h1>
+          <div class="authors" aria-label="Authors and affiliations">
+            <p class="author-list">
+              <span><strong>Jiahui Niu</strong><sup>1,2 *</sup></span>
+              <span><strong>Kefan Gu</strong><sup>3,4</sup></span>
+              <span><strong>Yucheng Zhao</strong><sup>4 &dagger;</sup></span>
+              <span><strong>Shengwen Liang</strong><sup>1 &Dagger;</sup></span>
+              <span><strong>Tiancai Wang</strong><sup>4 &Dagger;</sup></span>
+              <span><strong>Xing Hu</strong><sup>1</sup></span>
+              <span><strong>Ying Wang</strong><sup>1</sup></span>
+              <span><strong>Huawei Li</strong><sup>1</sup></span>
+            </p>
+            <p class="affiliations">
+              <sup>1</sup>State Key Lab of Processors, Institute of Computing
+              Technology, CAS<br />
+              <sup>2</sup>University of Chinese Academy of Sciences<br />
+              <span class="affiliation-row">
+                <span><sup>3</sup>Nanjing University</span>
+                <span><sup>4</sup>Dexmal</span>
+              </span>
+            </p>
+            <p class="author-notes">
+              <span><sup>*</sup>This work was done during the internship at Dexmal.</span>
+              <span><sup>&dagger;</sup>Project lead.</span>
+              <span><sup>&Dagger;</sup>Corresponding author.</span>
+            </p>
+          </div>
+
+          <div class="hero-actions" aria-label="Project links">
+            <a class="button secondary" href="https://github.com/dexmal/realtime-vla-flash">
+              <svg class="icon-github" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path
+                  d="M8 0C3.58 0 0 3.67 0 8.2c0 3.62 2.29 6.69 5.47 7.78.4.08.55-.18.55-.4 0-.2-.01-.85-.01-1.54-2.01.38-2.53-.5-2.69-.97-.09-.24-.48-.97-.82-1.17-.28-.15-.68-.52-.01-.53.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.1-1.78-.21-3.64-.91-3.64-4.05 0-.9.31-1.63.82-2.2-.08-.21-.36-1.05.08-2.18 0 0 .67-.22 2.2.84A7.39 7.39 0 0 1 8 3.93c.68 0 1.36.09 2 .28 1.53-1.06 2.2-.84 2.2-.84.44 1.13.16 1.97.08 2.18.51.57.82 1.3.82 2.2 0 3.15-1.87 3.84-3.65 4.05.29.26.54.76.54 1.54 0 1.1-.01 1.99-.01 2.26 0 .22.15.49.55.4A8.11 8.11 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"
+                />
+              </svg>
+              <span>Code</span>
+            </a>
+            <a class="button secondary" href="https://arxiv.org/abs/2605.13778">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path
+                  d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                />
+                <polyline
+                  points="14 2 14 8 20 8"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                />
+              </svg>
+              <span>Paper</span>
+            </a>
+            <a class="button secondary" href="https://huggingface.co/Dexmal/RealtimeVLA-Flash">
+              <svg class="icon-model" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="9"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                />
+                <circle cx="8.8" cy="10.5" r="1.25" />
+                <circle cx="15.2" cy="10.5" r="1.25" />
+                <path
+                  d="M8.1 14.7c2.1 1.9 5.7 1.9 7.8 0"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-width="2"
+                />
+              </svg>
+              <span>Model</span>
+            </a>
+          </div>
+
+          <figure id="demos" class="demo-video hero-demo">
+            <video
+              controls
+              playsinline
+              preload="metadata"
+              src="https://github.com/dexmal/realtime-vla-flash/releases/download/asset/demo.mp4"
+              aria-label="Real robot demo video"
+            ></video>
+          </figure>
+        </div>
+      </section>
+
+      <section id="overview" class="section story-section">
+        <div class="section-heading">
+          <h2>Why diffusion-based VLAs need faster inference</h2>
+          <p>
+            dVLAs generate high-quality action chunks, but synchronous full-path inference can make robot commands stale in reactive scenes.
+          </p>
+        </div>
+
+        <figure class="paper-figure overview-figure">
+          <img
+            src="./img/demo.png"
+            alt="Overview of sync inference failure and FLASH speculative inference"
+          />
+          <figcaption>
+            FLASH replaces slow full-path replanning with sub-8 ms speculative rounds, executing only the verified action prefix and falling back when the draft is inconsistent.
+          </figcaption>
+        </figure>
+
+        <div class="story-copy">
+          <p>
+            <strong>Problem.&nbsp;&nbsp;</strong>Action chunking reduces how often a dVLA replans, but each refresh still runs the full image-encoding, VLM-prefill, and action-denoising pipeline. During this delay, the robot keeps executing an open-loop chunk, which can become stale in reactive scenes.
+          </p>
+          <p>
+            <strong>Speculative Inference.&nbsp;&nbsp; </strong> A natural solution is to avoid rerunning the full inference path. But unlike LLMs or AR-VLAs, dVLAs produce continuous actions through iterative denoising, leaving no token-level probability for accepting or rejecting a draft.
+          </p>
+          <p>
+            <strong>Insight.&nbsp;&nbsp; </strong> Flow matching provides structure for consistency verification, and smooth-motion phases make nearby draft actions predictable.
+          </p>
+        </div>
+      </section>
+
+      <section id="method" class="section story-section method-section">
+        <div class="section-heading">
+          <h2>FLASH turns full inference into a dual-path runtime</h2>
+          <p>
+            FLASH keeps the original full path as a reliable anchor and adds a speculative path for rounds where a cheap draft can be verified.
+          </p>
+        </div>
+
+        <figure class="paper-figure framework-figure">
+          <img
+            src="./img/framework.png"
+            alt="Realtime-VLA FLASH framework and draft model architecture"
+          />
+          <figcaption>
+            FLASH keeps the original dVLA intact. The flash path drafts a candidate action chunk, verifies it with the main Action Expert at selected flow-matching timesteps, and executes only the longest consistent prefix. When verification fails or the trajectory enters a precision-sensitive phase, FLASH falls back to the full path.
+          </figcaption>
+        </figure>
+
+        <div class="story-copy">
+          <p>
+            <strong>❄️&nbsp;Full path.&nbsp;&nbsp;</strong> Runs Image Encoder, VLM prefill, and Action Denoise to refresh context and produce high-fidelity actions.
+          </p>
+          <p>
+            <strong>🔥&nbsp;Flash path.&nbsp;&nbsp;</strong> Runs the Image Encoder on the latest observation, then drafts and verifies a candidate action chunk in parallel, returning the longest consistent prefix.
+          </p>
+          <p>
+            <strong>Phase-aware fallback.&nbsp;&nbsp;</strong> Smooth motion often tolerates small draft errors, while final adjustments(eg. gripper switches) require higher-fidelity full-path actions.
+          </p>
+        </div>
+      </section>
+
+      <section id="results" class="section story-section results-section">
+        <div class="section-heading centered">
+          <h2>Lower latency without sacrificing task performance</h2>
+        </div>
+        <div class="stat-grid">
+          <article>
+            <strong>7.8 ms</strong>
+            <span>fastest flash-path round</span>
+          </article>
+          <article>
+            <strong>19.1 ms</strong>
+            <span>task-level average latency</span>
+          </article>
+          <article>
+            <strong>3.04×</strong>
+            <span>speedup over Torch-π0</span>
+          </article>
+          <article>
+            <strong>15 m/min</strong>
+            <span>extra-high conveyor speed</span>
+          </article>
+        </div>
+        <p class="results-copy">
+          On LIBERO, FLASH+Triton reduces average inference latency from 58.0 ms to 19.1 ms with only a 0.3-point drop in average success rate. On real conveyor-belt sorting, lower latency reduces stale action chunks and extends the speed range for grasping moving objects.
+        </p>
+
+        <div class="table-stack" aria-label="Quantitative results">
+          <figure class="result-table">
+            <div class="table-scroll">
+              <img
+                src="./img/table1.png"
+                alt="Simulation results on four LIBERO suites"
+              />
+            </div>
+            <figcaption>
+              FLASH+Triton reaches a 3.04× speedup over Torch-π0 while keeping
+              average success rate within 0.3 points.
+            </figcaption>
+          </figure>
+
+          <figure class="result-table">
+            <div class="table-scroll">
+              <img
+                src="./img/table2.png"
+                alt="Suite-level flash-path statistics on LIBERO"
+              />
+            </div>
+            <figcaption>
+              Across LIBERO suites, FLASH+Triton handles 66.8% of replanning rounds through the flash path, with accepted prefixes covering 69.7% of the replan window on average.
+            </figcaption>
+          </figure>
+
+          <figure class="result-table">
+            <div class="table-scroll">
+              <img
+                src="./img/table4.png"
+                alt="Conveyor-belt sorting results under synchronous inference"
+              />
+            </div>
+            <figcaption>
+              In real conveyor-belt sorting, FLASH+Triton is the only method with nonzero success at the extra-high 15 m/min speed.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="affiliations" class="section story-section affiliations-section">
+        <div class="section-heading">
+          <h2>Affiliations</h2>
+        </div>
+        <div class="logo-strip" aria-label="Author affiliations">
+          <div class="logo-item logo-item-wide">
+            <img
+              src="./img/ict_logo.png"
+              alt="Institute of Computing Technology, Chinese Academy of Sciences"
+            />
+          </div>
+          <div class="logo-item">
+            <img
+              src="./img/ucas_logo.png"
+              alt="University of Chinese Academy of Sciences"
+            />
+          </div>
+          <div class="logo-item">
+            <img
+              src="./img/nju_logo.png"
+              alt="Nanjing University"
+            />
+          </div>
+          <div class="logo-item logo-item-dexmal">
+            <img
+              src="./img/logo-dexmal.svg"
+              alt="Dexmal"
+            />
+          </div>
+        </div>
+      </section>
+
+      <section id="citation" class="section story-section citation-section">
+        <div class="section-heading">
+          <h2>Citation</h2>
+        </div>
+        <div class="citation-box">
+          <button class="copy-citation" type="button" data-copy-target="citation-code">
+            Copy
+          </button>
+          <div class="citation-scroll">
+            <pre><code id="citation-code">@article{niu2026realtimevlaflash,
+  title={Realtime-VLA FLASH: Speculative Inference Framework for Diffusion-based VLAs},
+  author={Niu, Jiahui and Gu, Kefan and Zhao, Yucheng and Liang, Shengwen and Wang, Tiancai and Hu, Xing and Wang, Ying and Li, Huawei},
+  journal={arXiv preprint arXiv:2605.13778},
+  year={2026}
+}</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+
+    
+    <script>
+      document.querySelectorAll("[data-copy-target]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.getElementById(button.dataset.copyTarget);
+          if (!target) return;
+
+          const text = target.textContent.trim();
+          try {
+            await navigator.clipboard.writeText(text);
+          } catch {
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.setAttribute("readonly", "");
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand("copy");
+            textarea.remove();
+          }
+
+          button.textContent = "Copied";
+          window.setTimeout(() => {
+            button.textContent = "Copy";
+          }, 1600);
+        });
+      });
+    </script>
+  </body>
+</html>
